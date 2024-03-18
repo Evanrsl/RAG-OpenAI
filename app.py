@@ -17,125 +17,126 @@ import chainlit as cl
 
 # load .env file
 load_dotenv()
-
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-
-import bs4
-from langchain import hub
-from langchain_community.document_loaders import WebBaseLoader
-from langchain_community.vectorstores import Chroma
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-from langchain_core.prompts import PromptTemplate
-
-from langchain_core.runnables import RunnableParallel
-
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-
-from langchain_core.messages import AIMessage, HumanMessage
-
-# Load, chunk and index the contents of the blog.
-loader = WebBaseLoader(
-    web_paths=("https://lilianweng.github.io/posts/2023-06-23-agent/",),
-    bs_kwargs=dict(
-        parse_only=bs4.SoupStrainer(
-            class_=("post-content", "post-title", "post-header")
-        )
-    ),
-)
-docs = loader.load()
-
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-splits = text_splitter.split_documents(docs)
-vectorstore = Chroma.from_documents(documents=splits, embedding=OpenAIEmbeddings())
-
-# Retrieve and generate using the relevant snippets of the blog.
-retriever = vectorstore.as_retriever()
-
-template = """Use the following pieces of context to answer the question at the end.
-If you don't know the answer, just say that you don't know, don't try to make up an answer.
-Use three sentences maximum and keep the answer as concise as possible.
-Always say "thanks for asking!" at the end of the answer.
-
-{context}
-
-Question: {question}
-
-Helpful Answer:"""
-custom_rag_prompt = PromptTemplate.from_template(template)
+PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
 
 
-llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
 
-def format_docs(docs):
-    return "\n\n".join(doc.page_content for doc in docs)
+# def augment_prompt(prompt: str):
+#     # get top 3 results from knowledge base
+#     results = index.query(
+#         vector=embedding(prompt['question']),
+#         top_k=5,
+#         include_metadata=True
+#     )
 
+#     source_knowledge = ""
+#     num_of_context = 0
+#     for result in results['matches']:
+#         score = result['score']
+#         text = result['metadata']['text']
+#         print(score)
+#         if score  > 0.85 and len(text) > 50:
+#             print(text)
+#             source_knowledge += f"text: {text} \n source:{result['metadata']['source']} \n\n"
+#             num_of_context += 1
+#     print(num_of_context)
+#     # feed into an augmented prompt
+#     if num_of_context > 0 :
+#         augmented_prompt = f"""{prompt['question']}
 
-# --------------- CHAT HISTORY -----------------
-contextualize_q_system_prompt = """Given a chat history and the latest user question \
-which might reference context in the chat history, formulate a standalone question \
-which can be understood without the chat history. Do NOT answer the question, \
-just reformulate it if needed and otherwise return it as is."""
-contextualize_q_prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", contextualize_q_system_prompt),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{question}"),
-    ]
-)
-contextualize_q_chain = contextualize_q_prompt | llm | StrOutputParser()
-
-qa_system_prompt = """You are an assistant for question-answering tasks. \
-Use the following pieces of retrieved context to answer the question. \
-If you don't know the answer, just say that you don't know. \
-Use three sentences maximum and keep the answer concise.\
-
-{context}"""
-qa_prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", qa_system_prompt),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{question}"),
-    ]
-)
+#         gunakan informasi ini jika berguna:
+#         {source_knowledge}"""
+#         print(augmented_prompt)
+#         return {"question": f"{augmented_prompt}"}
+#     return prompt
 
 
-def contextualized_question(input: dict):
-    if input.get("chat_history"):
-        return contextualize_q_chain
-    else:
-        return input["question"]
+# Chainlit
+
+@cl.on_chat_start
+async def on_chat_start():
+    memory = ConversationBufferMemory(return_messages=True)
+
+    # Initialize the model with specific configurations
+    model = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
 
 
-rag_chain = (
-    RunnablePassthrough.assign(
-        context=contextualized_question | retriever | format_docs
+
+    # Contextualizing the question
+
+    contextualize_q_system_prompt = """Given a chat history and the latest user question \
+    which might reference context in the chat history, formulate a standalone question \
+    which can be understood without the chat history. Do NOT answer the question, \
+    just reformulate it if needed and otherwise return it as is."""
+    contextualize_q_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{question}"),
+        ]
     )
-    | qa_prompt
-    | llm
-)
+    contextualize_q_chain = contextualize_q_prompt | model | StrOutputParser()
 
 
+    # Chain with chat history
 
-# rag_chain = (
-#     {"context": retriever | format_docs, "question": RunnablePassthrough()}
-#     | custom_rag_prompt
-#     | llm
-#     | StrOutputParser()
-# )
-rag_chain_from_docs = (
-    RunnablePassthrough.assign(context=(lambda x: format_docs(x["context"])))
-    | custom_rag_prompt
-    | llm
-    | StrOutputParser()
-)
-rag_chain_with_source = RunnableParallel(
-    {"context": retriever, "question": RunnablePassthrough()}
-).assign(answer=rag_chain_from_docs)
+    qa_system_prompt = """You are an assistant for question-answering tasks. \
+    Use the following pieces of retrieved context to answer the question. \
+    If you don't know the answer, just say that you don't know. \
+    Use three sentences maximum and keep the answer concise.\
 
-# rag_chain.invoke("What is Task Decomposition?")
+    {context}"""
+    qa_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", qa_system_prompt),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{question}"),
+        ]
+    )
 
-rag_chain_with_source.invoke("What is Task Decomposition")
+    def contextualized_question(input: dict):
+        if input.get("chat_history"):
+            return contextualize_q_chain
+        else:
+            return input["question"]
+
+
+    rag_chain = (
+        RunnablePassthrough.assign(
+            context=contextualized_question | retriever | format_docs
+        )
+        | qa_prompt
+        | model
+    )
+
+    # Combine the prompt and model into a runnable and store in the session
+    runnable = (
+        augment_prompt
+        | RunnablePassthrough.assign(
+            history=RunnableLambda(memory.load_memory_variables)
+            | itemgetter("history"))
+        | prompt
+        | model
+        | StrOutputParser())
+
+    cl.user_session.set("memory", memory)
+    cl.user_session.set("runnable", runnable)
+
+
+@cl.on_message
+async def on_message(message: cl.Message):
+    memory = cl.user_session.get("memory")  # type: ConversationBufferMemory
+    runnable = cl.user_session.get("runnable")  # Retrieve the stored runnable
+
+    msg = cl.Message(content="")
+
+    async for chunk in runnable.astream(
+        {"question": message.content},
+        config=RunnableConfig(callbacks=[cl.LangchainCallbackHandler()]),
+    ):
+        await msg.stream_token(chunk)
+
+    await msg.send()
+
+    memory.chat_memory.add_user_message(message.content)
+    memory.chat_memory.add_ai_message(msg.content)
