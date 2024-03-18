@@ -1,4 +1,4 @@
-import openai
+import openai_example
 from pinecone import Pinecone as pinecone
 
 import os
@@ -46,7 +46,7 @@ else:
 
 # Initialize Embeddings model
 def embedding(query):
-    client = openai.OpenAI(
+    client = openai_example.OpenAI(
         base_url=ANYSCALE_API_BASE,
         api_key=ANYSCALE_API_KEY
     )
@@ -94,19 +94,12 @@ async def on_chat_start():
     memory = ConversationBufferMemory(return_messages=True)
 
     # Initialize the model with specific configurations
-    model = ChatAnyscale(anyscale_api_key=ANYSCALE_API_KEY,
-                         temperature=0, model_name=LLM_MODEL, streaming=True)
-
-    system_prompt = """Anda adalah robot asisten yang canggih berbahasa indonesia dan hanya akan menjawab dalam bahasa indonesia, \
-                Jika anda tidak tahu jawabannya, jawab saja tidak tahu, \
-                jika informasi tambahan yang diberikan dapat membantu menjawab pertanyaan, tambahkan ke jawaban anda, \
-                jika informasi tambahan tidak berguna abaikan informasi tambahan, \
-                jika saya tidak mengajukan pertanyaan, anda akan bertanya apa yang anda bisa bantu"""
+    model = ChatOpenAI(streaming=True)
 
     # Define the prompt template with an introduction in Bahasa Indonesia
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", system_prompt),
+            ("system", "You are a helpful chatbot"),
             MessagesPlaceholder(variable_name="history"),
             ("human", "{question}"),
         ]

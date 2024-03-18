@@ -47,13 +47,13 @@ chain_type_kwargs = {"prompt": prompt}
 
 
 def process_file(file: AskFileResponse):
-    import tempfile
+    # import tempfile
 
-    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tempfile:
-        with open(tempfile.name, "wb") as f:
-            f.write(file.content)
+    # with tempfile.NamedTemporaryFile(mode="w", delete=False) as tempfile:
+    #     with open(tempfile.name, "wb") as f:
+    #         f.write(file)
 
-    pypdf_loader = PyPDFLoader(tempfile.name)
+    pypdf_loader = PyPDFLoader(file.path)
     texts = pypdf_loader.load_and_split()
     texts = [text.page_content for text in texts]
     return texts
@@ -75,7 +75,7 @@ async def on_chat_start():
     file = files[0]
 
     msg = cl.Message(
-        content=f"Processing `{file.name}`...", disable_human_feedback=True
+        content=f"Processing `{file.name}`...", disable_feedback=True
     )
     await msg.send()
 

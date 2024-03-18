@@ -1,142 +1,141 @@
-import openai
-from pinecone import Pinecone as pinecone
-
 import os
-from dotenv import load_dotenv
+from typing import List
+from langchain.document_loaders import PyPDFLoader, TextLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.vectorstores.pinecone import Pinecone
+from langchain.chains import ConversationalRetrievalChain
+from langchain.chat_models import ChatOpenAI
+from langchain.memory import ChatMessageHistory, ConversationBufferMemory
+from langchain.docstore.document import Document
 
-from langchain_community.chat_models import ChatAnyscale
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.schema import StrOutputParser
-from langchain.schema.runnable import RunnablePassthrough, RunnableLambda
-from langchain.schema.runnable.config import RunnableConfig
-from langchain.memory import ConversationBufferMemory
+import pinecone
 
-from operator import itemgetter
 import chainlit as cl
+from chainlit.types import AskFileResponse
+
+pinecone.init(
+    api_key=os.environ.get("PINECONE_API_KEY"),
+    environment=os.environ.get("PINECONE_ENV"),
+)
+
+index_name = "openai"
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+embeddings = OpenAIEmbeddings()
+
+namespaces = set()
+
+welcome_message = """Welcome to the Chainlit PDF QA demo! To get started:
+1. Upload a PDF or text file
+2. Ask a question about the file
+"""
 
 
-# load .env file
-load_dotenv()
-PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
+def process_file(file: AskFileResponse):
+    if file.type == "text/plain":
+        Loader = TextLoader
+    elif file.type == "application/pdf":
+        Loader = PyPDFLoader
+
+        loader = Loader(file.path)
+        documents = loader.load()
+        docs = text_splitter.split_documents(documents)
+        for i, doc in enumerate(docs):
+            doc.metadata["source"] = f"source_{i}"
+        return docs
 
 
+def get_docsearch(file: AskFileResponse):
+    docs = process_file(file)
 
-# def augment_prompt(prompt: str):
-#     # get top 3 results from knowledge base
-#     results = index.query(
-#         vector=embedding(prompt['question']),
-#         top_k=5,
-#         include_metadata=True
-#     )
+    # Save data in the user session
+    cl.user_session.set("docs", docs)
 
-#     source_knowledge = ""
-#     num_of_context = 0
-#     for result in results['matches']:
-#         score = result['score']
-#         text = result['metadata']['text']
-#         print(score)
-#         if score  > 0.85 and len(text) > 50:
-#             print(text)
-#             source_knowledge += f"text: {text} \n source:{result['metadata']['source']} \n\n"
-#             num_of_context += 1
-#     print(num_of_context)
-#     # feed into an augmented prompt
-#     if num_of_context > 0 :
-#         augmented_prompt = f"""{prompt['question']}
+    # Create a unique namespace for the file
+    namespace = file.id
 
-#         gunakan informasi ini jika berguna:
-#         {source_knowledge}"""
-#         print(augmented_prompt)
-#         return {"question": f"{augmented_prompt}"}
-#     return prompt
+    if namespace in namespaces:
+        docsearch = Pinecone.from_existing_index(
+            index_name=index_name, embedding=embeddings, namespace=namespace
+        )
+    else:
+        docsearch = Pinecone.from_documents(
+            docs, embeddings, index_name=index_name, namespace=namespace
+        )
+        namespaces.add(namespace)
 
+    return docsearch
 
-# Chainlit
 
 @cl.on_chat_start
-async def on_chat_start():
-    memory = ConversationBufferMemory(return_messages=True)
+async def start():
+    # await cl.Avatar(
+    #     name="Chatbot",
+    #     url="https://avatars.githubusercontent.com/u/128686189?s=400&u=a1d1553023f8ea0921fba0debbe92a8c5f840dd9&v=4",
+    # ).send()
+    files = None
+    while files is None:
+        files = await cl.AskFileMessage(
+            content=welcome_message,
+            accept=["text/plain", "application/pdf"],
+            max_size_mb=20,
+            timeout=180,
+        ).send()
 
-    # Initialize the model with specific configurations
-    model = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
+    file = files[0]
 
+    msg = cl.Message(content=f"Processing `{file.name}`...", disable_feedback=True)
+    await msg.send()
 
+    # No async implementation in the Pinecone client, fallback to sync
+    docsearch = await cl.make_async(get_docsearch)(file)
 
-    # Contextualizing the question
+    message_history = ChatMessageHistory()
 
-    contextualize_q_system_prompt = """Given a chat history and the latest user question \
-    which might reference context in the chat history, formulate a standalone question \
-    which can be understood without the chat history. Do NOT answer the question, \
-    just reformulate it if needed and otherwise return it as is."""
-    contextualize_q_prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", contextualize_q_system_prompt),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{question}"),
-        ]
-    )
-    contextualize_q_chain = contextualize_q_prompt | model | StrOutputParser()
-
-
-    # Chain with chat history
-
-    qa_system_prompt = """You are an assistant for question-answering tasks. \
-    Use the following pieces of retrieved context to answer the question. \
-    If you don't know the answer, just say that you don't know. \
-    Use three sentences maximum and keep the answer concise.\
-
-    {context}"""
-    qa_prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", qa_system_prompt),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{question}"),
-        ]
+    memory = ConversationBufferMemory(
+        memory_key="chat_history",
+        output_key="answer",
+        chat_memory=message_history,
+        return_messages=True,
     )
 
-    def contextualized_question(input: dict):
-        if input.get("chat_history"):
-            return contextualize_q_chain
-        else:
-            return input["question"]
-
-
-    rag_chain = (
-        RunnablePassthrough.assign(
-            context=contextualized_question | retriever | format_docs
-        )
-        | qa_prompt
-        | model
+    chain = ConversationalRetrievalChain.from_llm(
+        ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0, streaming=True),
+        chain_type="stuff",
+        retriever=docsearch.as_retriever(),
+        memory=memory,
+        return_source_documents=True,
     )
 
-    # Combine the prompt and model into a runnable and store in the session
-    runnable = (
-        augment_prompt
-        | RunnablePassthrough.assign(
-            history=RunnableLambda(memory.load_memory_variables)
-            | itemgetter("history"))
-        | prompt
-        | model
-        | StrOutputParser())
+    # Let the user know that the system is ready
+    msg.content = f"`{file.name}` processed. You can now ask questions!"
+    await msg.update()
 
-    cl.user_session.set("memory", memory)
-    cl.user_session.set("runnable", runnable)
+    cl.user_session.set("chain", chain)
 
 
 @cl.on_message
-async def on_message(message: cl.Message):
-    memory = cl.user_session.get("memory")  # type: ConversationBufferMemory
-    runnable = cl.user_session.get("runnable")  # Retrieve the stored runnable
+async def main(message: cl.Message):
+    chain = cl.user_session.get("chain")  # type: ConversationalRetrievalChain
+    cb = cl.AsyncLangchainCallbackHandler()
+    res = await chain.acall(message.content, callbacks=[cb])
+    answer = res["answer"]
+    source_documents = res["source_documents"]  # type: List[Document]
 
-    msg = cl.Message(content="")
+    text_elements = []  # type: List[cl.Text]
 
-    async for chunk in runnable.astream(
-        {"question": message.content},
-        config=RunnableConfig(callbacks=[cl.LangchainCallbackHandler()]),
-    ):
-        await msg.stream_token(chunk)
+    if source_documents:
+        for source_idx, source_doc in enumerate(source_documents):
+            source_name = f"source_{source_idx}"
+            # Create the text element referenced in the message
+            text_elements.append(
+                cl.Text(content=source_doc.page_content, name=source_name)
+            )
+        source_names = [text_el.name for text_el in text_elements]
 
-    await msg.send()
+        if source_names:
+            answer += f"\nSources: {', '.join(source_names)}"
+        else:
+            answer += "\nNo sources found"
 
-    memory.chat_memory.add_user_message(message.content)
-    memory.chat_memory.add_ai_message(msg.content)
+    await cl.Message(content=answer, elements=text_elements).send()
