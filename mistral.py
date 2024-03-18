@@ -14,7 +14,6 @@ from langchain.memory import ConversationBufferMemory
 from operator import itemgetter
 import chainlit as cl
 
-import gradio as gr
 
 # load .env file
 load_dotenv()
@@ -144,20 +143,3 @@ async def on_message(message: cl.Message):
 
     memory.chat_memory.add_user_message(message.content)
     memory.chat_memory.add_ai_message(msg.content)
-
-with gr.Blocks() as demo:
-    chatbot = gr.Chatbot()
-    msg = gr.Textbox()
-    clear = gr.ClearButton([msg, chatbot])
-
-
-    def respond(message, chat_history):
-
-        bot_message = mistral(message)
-        chat_history.append((message, bot_message))
-        return "", chat_history
-
-    msg.submit(respond, [msg, chatbot], [msg, chatbot])
-
-if __name__ == "__main__":
-    demo.launch(share=True, debug=True)
