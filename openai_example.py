@@ -7,7 +7,7 @@ from langchain.vectorstores import Chroma
 from langchain.chains import (
     ConversationalRetrievalChain,
 )
-from langchain.document_loaders import PyPDFLoader
+from langchain.document_loaders import PyPDFLoader, TextLoader
 from langchain.chat_models import ChatOpenAI
 from langchain.prompts.chat import (
     ChatPromptTemplate,
@@ -45,19 +45,23 @@ messages = [
 prompt = ChatPromptTemplate.from_messages(messages)
 chain_type_kwargs = {"prompt": prompt}
 
+welcome_message = """Welcome to the Chainlit PDF QA demo! To get started:
+1. Upload a PDF or text file
+2. Ask a question about the file
+"""
 
 def process_file(file: AskFileResponse):
-    # import tempfile
+    if file.type == "text/plain":
+        Loader = TextLoader
+    elif file.type == "application/pdf":
+        Loader = PyPDFLoader
 
-    # with tempfile.NamedTemporaryFile(mode="w", delete=False) as tempfile:
-    #     with open(tempfile.name, "wb") as f:
-    #         f.write(file)
-
-    pypdf_loader = PyPDFLoader(file.path)
-    texts = pypdf_loader.load_and_split()
-    texts = [text.page_content for text in texts]
-    return texts
-
+        loader = Loader(file.path)
+        documents = loader.load()
+        docs = text_splitter.split_documents(documents)
+        for i, doc in enumerate(docs):
+            doc.metadata["source"] = f"source_{i}"
+        return docs
 
 @cl.on_chat_start
 async def on_chat_start():
@@ -66,7 +70,7 @@ async def on_chat_start():
     # Wait for the user to upload a file
     while files == None:
         files = await cl.AskFileMessage(
-            content="Please upload a PDF file to begin!",
+            content = welcome_message,
             accept=["application/pdf"],
             max_size_mb=20,
             timeout=180,
@@ -82,7 +86,7 @@ async def on_chat_start():
     # load the file
     texts = process_file(file)
 
-    print(texts[0])
+    # print(texts[0])
 
     # Create a metadata for each chunk
     metadatas = [{"source": f"{i}-pl"} for i in range(len(texts))]
